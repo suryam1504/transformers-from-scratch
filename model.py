@@ -126,13 +126,13 @@ class MultiHeadAttentionBlock(nn.Module):
         if dropout is not None:
             attention_scores = dropout(attention_scores)
 
-        return (attention_scores @ value), attention_scores # the last part is for visualization
+        return (attention_scores @ value), attention_scores # first part is weighted sum of value vectors,the last part is just for visualization
 
 
     # see rough.ipynb
-    def forward(self, q, k, v, mask): # mask if for decoder, doing masked multi head attentiona and setting the upper triangle values from Q*K^T/root(d_k) before doing softmax
+    def forward(self, q, k, v, mask): # mask is for decoder, doing masked multi head attentiona and setting the upper triangle values from Q*K^T/root(d_k) before doing softmax
 
-    # here, in encoder, q = k = v = x, which is the output of the previous layer (or input embeddings for the first layer), and they have shape (batch_size, seq_len, d_model). we just name it differently bcoz in decoder we do cross attention and q comes from the previous layer of decoder and k and v come from the output of encoder, so they are different, and this one function handles all scenarios.
+    # here, in encoder, for the first time, q = k = v = x (the first input emb), as we move on the architecture, they will the output of the previous layer, and they have shape (batch_size, seq_len, d_model). we just name it differently bcoz in decoder we do cross attention and q comes from the previous layer of decoder and k and v come from the output of encoder, so they are different, and this one function handles all scenarios.
 
         # following code is for the linear projections of query, key and value (the dot product of q * W_q, etc.), we are going from (batch_size, seq_len, d_model) to (batch_size, seq_len, d_model) for each of them, and then we will split them into h heads later. we are doing this for all heads together to be more efficient, instead of doing it separately for each head.
         query = self.W_q(q) # going from (batch_size, seq_len, d_model) --> (batch_size, seq_len, d_model) = (2, 3, 512)
@@ -145,14 +145,68 @@ class MultiHeadAttentionBlock(nn.Module):
         key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2) # shape: (batch_size, h, seq_len, d_k) = (2, 8, 3, 64)
         value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2) # shape: (batch_size, h, seq_len, d_k) = (2, 8, 3, 64)
 
-        # SOOOO essentially, there aren't 8 different sets of W_q, W_k, W_v that we define. We divided 3 words of 512 dim each to 8 heads which has 3 words each of each 64 dim, 
+        # SOOOO essentially, there aren't 8 different sets of W_q, W_k, W_v that we define. We divided 3 words of 512 dim each to 8 heads which has 3 words each of each 64 dim, so its like we take input vector say 3*512, dot product with W_q of 512*512 to get query evctor of 3*512, take 8 cols of 3*64 each
         # We have ONE W_q (512×512) that projects 3 words from 512-dim to 512-dim, and then we SPLIT that 512-dim output into 8 heads of 64-dim each, so each head sees all 3 words but only a 64-dim slice of the representation.
 
 
-        x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout) # shape of x: (batch_size, h, seq_len, d_k) = (2, 8, 3, 64)
+        x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout) # returns weighted sum of value vectors, shape of x: (batch_size, h, seq_len, d_k) = (2, 8, 3, 64)
 
         # now concat and multiply by W_o to get back to (batch_size, seq_len, d_model)
         x = x.transpose(1,2).contiguous().view(x.shape[0], -1, self.h * self.d_k) # shape: (batch_size, seq_len, d_model) = (2, 3, 512)
         return self.W_o(x)
 
+class ResidualConnection(nn.Module):
 
+    def __init__(self, dropout: float) -> None:
+        super().__init__()
+        self.norm = LayerNormalization() 
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, sublayer):
+        # x is the input tensor (either embeddings for layer 1, or previous layer's output for subsequent layers)
+        # sublayer is a function (either multiheadattention block or feedforward block, the 2 blocks which are inside the encoder block) that will be applied to x
+        return x + self.dropout(sublayer(self.norm(x))) 
+
+        # in the paper, order is: SUBLAYER → ADD → NORM (Post-LN)
+        # here, order is: NORM → SUBLAYER → DROPOUT → ADD (Pre-LN)
+        # Pre-LN is a common modern variation — it normalizes the input BEFORE the sublayer (attention or feedforward) rather than after the residual add.
+        # this improves training stability because gradients flow more cleanly through the residual path, and avoids the need for careful learning rate warmup.
+        # most modern LLMs (GPT-2, GPT-3 etc.) use Pre-LN over the original paper's Post-LN.
+
+# Now creating Encoder Block which has 2 blocks inside, multiheadattention block (multiheadatttention + add and norm) and feedforward block (feedforward + add and norm)
+
+class EncoderBlock(nn.Module):
+
+    def __init__(self, self_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
+        super().__init__()
+        self.self_attention_block = self_attention_block
+        self.feed_forward_block = feed_forward_block
+        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)]) # we have 2 residual connections, one for each block inside the encoder block
+
+    def forward(self, x, src_mask): # source mask is to prevent any interaction between padding tokens and actual tokens, we apply it to the input of the ancoder
+
+        # 1. multiheadattention block with residual connection
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mask)) # for self attention, q=k=v=x (in deocder, q comes from decoder and k and v from encoder)
+        # 2. feedforward block with residual connection
+        x = self.residual_connections[1](x, self.feed_forward_block)
+        return x
+    
+# noe we can multiple encoder blocks, 6 in the paper
+
+class Encoder(nn.Module):
+
+    def __init__(self, layers: nn.ModuleList) -> None: # layers = encoder blocks 
+        super().__init__()
+        self.layers = layers
+        self.norm = LayerNormalization() 
+
+    def forward(self, x, src_mask):
+        # passing the input through each encoder block one by one, where the output of each block becomes the input to the next, and normalize at the end
+        for layer in self.layers:
+            x = layer(x, src_mask)
+        return self.norm(x)
+
+
+## DECODER
+
+# decoder block
