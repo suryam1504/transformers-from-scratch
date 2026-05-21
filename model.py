@@ -1,3 +1,5 @@
+# Machine Translation with Transformer from scratch in PyTorch
+
 # practical ref (this .py file) - https://www.youtube.com/watch?v=ISNdQcPhsts&t=9085s
 
 # theory ref (campusx) - https://www.youtube.com/watch?v=BjRVS2wTtcA&list=PLkBMe2eZMRQ2VKEtoL0GVUrNzEiXfgj07
@@ -203,10 +205,142 @@ class Encoder(nn.Module):
     def forward(self, x, src_mask):
         # passing the input through each encoder block one by one, where the output of each block becomes the input to the next, and normalize at the end
         for layer in self.layers:
-            x = layer(x, src_mask)
+            x = layer(x, src_mask) # calls the foward method in encoder block
         return self.norm(x)
 
 
 ## DECODER
 
 # decoder block
+class DecoderBlock(nn.Module):
+
+    def __init__(self, self_attention_block: MultiHeadAttentionBlock, cross_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
+        super().__init__()
+        self.self_attention_block = self_attention_block
+        self.cross_attention_block = cross_attention_block
+        self.feed_forward_block = feed_forward_block
+        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(3)]) # we have 3 residual connections, one for each block inside the decoder block (self attention block, cross attention block and feedforward block)
+
+    def forward(self, x, encoder_output, src_mask, tgt_mask): # x is input of decoder block, encoder_output is output of encoder which will be used in cross attention block, src_mask is source mask for cross attention block in decoder to prevent any interaction between padding tokens and actual tokens, tgt_mask is target mask for masked multi head attention block in decoder to prevent attending to future tokens
+        # 1. masked multiheadattention block with residual connection
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, tgt_mask)) # for self attention in decoder, q=k=v=x (the input to the decoder block)
+        # 2. cross multiheadattention block with residual connection
+        x = self.residual_connections[1](x, lambda x: self.cross_attention_block(x, encoder_output, encoder_output, src_mask)) # for cross attention in decoder, q comes from previous layer of decoder which is x here and k and v come from output of encoder which is encoder_output here
+        # 3. feedforward block with residual connection
+        x = self.residual_connections[2](x, self.feed_forward_block)
+        return x
+    
+# now we can multiple decoder blocks, 6 in the paper
+class Decoder(nn.Module):
+
+    def __init__(self, layers: nn.ModuleList) -> None: # layers = decoder blocks 
+        super().__init__()
+        self.layers = layers
+        self.norm = LayerNormalization() 
+
+    def forward(self, x, encoder_output, src_mask, tgt_mask):
+        # passing the input through each decoder block one by one, where the output of each block becomes the input to the next, and normalize at the end
+        for layer in self.layers:
+            x = layer(x, encoder_output, src_mask, tgt_mask) # calls the foward method in decoder block
+        return self.norm(x)
+    
+
+# now we need Linear layer at the end to project the output of decoder to vocab size for prediction
+# the dim after decoder has done its thing is (seq_len, d_model), we need to project it to (seq_len, vocab_size) for prediction
+
+class ProjectionLayer(nn.Module):
+
+    def __init__(self, d_model: int, vocab_size: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(d_model, vocab_size) # shape: (Batch, d_model, vocab_size)
+
+    def forward(self, x):
+        return torch.log_softmax(self.proj(x), dim=-1) # shape: (Batch, seq_len, vocab_size)
+    # we use log_softmax here instead of softmax (which paper says) for numerical stability, because when we calculate the loss using negative log likelihood loss, it expects log probabilities as input, and using log_softmax gives us log probabilities directly, so we don't have to take log of the output of softmax which can lead to numerical instability if the probabilities are very small.
+
+
+# Now transformer
+class Transformer(nn.Module):
+
+    def __init__(self, encoder: Encoder, decoder: Decoder, src_embed: InputEmbeddings, tgt_embed: InputEmbeddings, src_pos: PositionalEncoding, tgt_pos: PositionalEncoding, projection_layer: ProjectionLayer) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_embedding = src_embed
+        self.tgt_embedding = tgt_embed
+        self.src_pos = src_pos
+        self.tgt_pos = tgt_pos
+        self.projection_layer = projection_layer
+
+    # now we define 3 methods, one to encode, one to decode, and one to project. why not create just one forward() method:
+    # 1. as we will see, during inference, we can use the output of the encoder and we dont have to calculate it multiple times
+    # 2. we prefer to keep this output separate for visualizing attention
+
+    def encode(self, src, src_mask):
+        src = self.src_embed(src)
+        src = self.src_pos(src)
+        return self.encoder(src, src_mask)
+    
+    def decode(self, encoder_output, src_mask, tgt, tgt_mask):
+        tgt = self.tgt_embed(tgt)
+        tgt = self.tgt_pos(tgt)
+        return self.decoder(tgt, encoder_output, src_mask, tgt_mask) # calls forward method of decoder which calls forward method of decoder block which calls forward method of multiheadattention block and feedforward block, etc.
+    
+    def project(self, x): # x is essentially decoder output here
+        return self.projection_layer(x)
+    
+
+# now we need to combine all the blocks which given all the hyperpameters will build the whole transformer model and initialize it with those params
+
+# so while we can use this transformer for any task, think of machine translation for now. hence naming is accordingly.
+
+def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int = 512, h: int = 8, d_ff: int = 2048, N: int = 6, dropout: float = 0.1) -> Transformer:
+    # 1. src_vocab_size and tgt_vocab_size are the number of unique tokens in source and target language respectively, we need this to let nn.Embedding know how many we tokens we have in dataset and accordingly have an id for each of them which will correspond to 512 dim emb
+    # 2. src_seq_len and tgt_seq_len are the maximum sequence length that the model can handle for source and target language respectively, we need this to create the positional encodings for all positions up to src_seq_len and tgt_seq_len, could be different could be same depending on task
+    # 3. d_model is the dimension of the embedding vector for each token, 512 in the paper
+    # 4. h is the number of heads in multi head attention, 8 in the paper
+    # 5. d_ff is the dimension of the inner layer of feedforward block, 2048 in the paper
+    # 6. n is the number of encoder and decoder blocks, 6 in the paper
+    # 7. dropout is the dropout rate, 0.1 in the paper
+
+    # cfeate embedding layers
+    src_embed = InputEmbeddings(d_model, src_vocab_size)
+    tgt_embed = InputEmbeddings(d_model, tgt_vocab_size)
+
+    # create positional encoding layers
+    src_pos = PositionalEncoding(d_model, src_seq_len, dropout)
+    tgt_pos = PositionalEncoding(d_model, tgt_seq_len, dropout) # we dont really need two as they do same things but i am learning rn so creating both for better understanding
+
+    # create encoder blocks
+    encoder_blocks = []
+    for _ in range(N):
+        encoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        encoder_block = EncoderBlock(encoder_self_attention_block, feed_forward_block, dropout)
+        encoder_blocks.append(encoder_block)
+
+    # create decoder blocks
+    decoder_blocks = []
+    for _ in range(N):
+        decoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        decoder_cross_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        decoder_block = DecoderBlock(decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout)
+        decoder_blocks.append(decoder_block)
+
+    # create encoder and decoder
+    encoder = Encoder(nn.ModuleList(encoder_blocks))
+    decoder = Decoder(nn.ModuleList(decoder_blocks))
+
+    # create projection layer
+    projection_layer = ProjectionLayer(d_model, tgt_vocab_size)
+
+    # create transformer
+    transformer = Transformer(encoder, decoder, src_embed, tgt_embed, src_pos, tgt_pos, projection_layer)
+
+    # intialize the parameters using xavier initialization, which is a common initialization technique for deep learning models that helps in maintaining a good variance of the activations and gradients throughout the network, which in turn helps in faster convergence during training.
+    for p in transformer.parameters():
+        if p.dim() > 1: 
+            nn.init.xavier_uniform_(p) # yea idk what this is
+
+    return transformer
