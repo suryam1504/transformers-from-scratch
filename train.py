@@ -45,5 +45,5 @@ def get_ds(config):
     train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size]) # splits ds_raw into two datasets of size train_ds_size and val_ds_size
 
 
-# creating the dataset, basically the tensors from the dataset that our model could use, in dataset.py file
+# creating the dataset, basically the tensors from the dataset that our model could use, in dataset.py file  
 
