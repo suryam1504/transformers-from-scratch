@@ -1,5 +1,7 @@
 # English to Italian transalation using HF Opus Books dataset - https://huggingface.co/datasets/Helsinki-NLP/opus_books/viewer/en-it
 
+import warnings
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Datset, DataLoader, random_split
@@ -10,6 +12,7 @@ from model import build_transformer
 from config import get_weights_file_path, get_config
 
 from datasets import load_dataset
+from tqdm import tqdm
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel # in this project we will just do word level instead of BPE and other stuff
 from tokenizers.trainers import WordLevelTrainer # this class trains the tokenizer on the dataset, i.e. build the vocabulary given a bunch of sentnces from source language and target language
@@ -106,7 +109,61 @@ def train_model(config):
     initial_epoch = 0
     global_step = 0
     if config['preload']:
-        model_filename = get
+        model_filename = get_weights_file_path(config, config['preload'])
+        print(f'Preloading model {model_filename}')
+        state = torch.load(model_filename)
+        initial_epoch = state['epoch'] + 1
+        optimizer.load_state_dict(state['optimizer_state_dict'])
+        global_step = state['global_step']
+
+    # loss function
+    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_tgt.token_to_id('[PAD]'), label_smoothing=0.1).to(device) # we will ignore the loss for padding tokens, because they are just there to make the input length equal to seq_len, and they don't carry any meaning, so we don't want our model to learn anything from them
     
+    for epoch in range(initial_epoch, config['num_epochs']):
+        model.train()
+        batch_iterator = tqdm(train_dataloader, desc=f'Processing epoch {epoch:02d}')
+        for batch in batch_iterator:
+            encoder_input = batch['encoder_input'].to(device) # (batch, seq_len)
+            decoder_input = batch['decoder_input'].to(device) # (batch, seq_len)
+            encoder_mask = batch['encoder_mask'].to(device) # (batch, 1, 1, seq_len)
+            decoder_mask = batch['decoder_mask'].to(device) # (batch, 1, seq_len, seq_len)
+
+            # run the tensors through transfomer
+            encoder_output = model.encode(encoder_input, encoder_mask) # )batch, seq_len, d_model) 
+            decoder_output = model.decode(encoder_input, encoder_mask, decoder_input, decoder_mask) # (batch, seq_len, d_model)
+            proj_output = model.project(decoder_output) # (batch, seq_len, tat_vocab_size)
+
+            label = batch['label'].to(device) # (batch, seq_len)
+
+            # # (batch, seq_len, tat_vocab_size) -> (batch*seq_len, tat_vocab_size) 
+            loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1)) # we need to reshape the output and label to be of shape (batch*seq_len, vocab_size) and (batch*seq_len) respectively, because CrossEntropyLoss expects the input to be of shape (N, C) where N is the number of samples and C is the number of classes, and the target to be of shape (N) where each value is the class index
+            batch_iterator.set_postfix({f'loss': f'{loss.item():6.3f}'})
+
+            # log the loss to tensorboard
+            writer.add_scalar('train/loss', loss.item(), global_step)
+            writer.flush()
+
+            # back
+            loss.backward()
+
+            # update weights
+            optimizer.step()
+            optimizer.zero_grad()
+
+            global_step += 1
+
+        # save model at the end of each epoch
+        model_filename = get_weights_file_path(config, f'{epoch:02d}')
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(), # all weights of model
+            'optimizer_state_dict': optimizer.state_dict(),
+            'global_step': global_step
+        }, model_filename)
+
+if __name__ == "__main__":
+    warnings.filterwarnings("ignore")
+    config = get_config()
+    train_model(config)
 
 
