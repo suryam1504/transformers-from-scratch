@@ -17,9 +17,9 @@ class BilingualDataset(Dataset):
         self.seq_len = seq_len
 
         # get the token ids for special tokens, which will be used during training and inference
-        self.sos_token = torch.Tensor([tokenizer_src.token_to_id(['[SOS]'])], dtype = torch.int64) # could have used tokenizer_tgt as well, since both source and target language will have same special tokens
-        self.eos_token = torch.Tensor([tokenizer_src.token_to_id(['[EOS]'])], dtype = torch.int64)
-        self.pad_token = torch.Tensor([tokenizer_src.token_to_id(['[PAD]'])], dtype = torch.int64)
+        self.sos_token = torch.tensor([tokenizer_src.token_to_id('[SOS]')], dtype=torch.int64) # could have used tokenizer_tgt as well, since both source and target language will have same special tokens
+        self.eos_token = torch.tensor([tokenizer_src.token_to_id('[EOS]')], dtype=torch.int64)
+        self.pad_token = torch.tensor([tokenizer_src.token_to_id('[PAD]')], dtype=torch.int64)
 
     def __len__(self):
         return len(self.ds) # return the number of samples in the dataset
@@ -52,9 +52,9 @@ class BilingualDataset(Dataset):
         encoder_input = torch.cat( # concatenate
             [
                 self.sos_token, # add [SOS] token at the beginning of the input
-                torch.Tensor(enc_input_tokens, dtype = torch.int64), # convert list of input ids to tensor
+                torch.tensor(enc_input_tokens, dtype=torch.int64), # convert list of input ids to tensor
                 self.eos_token, # add [EOS] token at the end of the input
-                torch.tensor([self.pad_token] * enc_num_padding_tokens, dtype = torch.int64) # add padding tokens at the end of the input to reach seq_len
+                torch.tensor([self.pad_token.item()] * enc_num_padding_tokens, dtype=torch.int64) # add padding tokens at the end of the input to reach seq_len
             ]
         )
 
@@ -62,17 +62,17 @@ class BilingualDataset(Dataset):
         decoder_input = torch.cat(
             [
                 self.sos_token,
-                torch.Tensor(dec_input_tokens, dtype = torch.int64), 
-                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype = torch.int64)
+                torch.tensor(dec_input_tokens, dtype=torch.int64),
+                torch.tensor([self.pad_token.item()] * dec_num_padding_tokens, dtype=torch.int64)
             ]
         )       
 
         # add EOS to the label (what we expect as output from decoder)
         label = torch.cat(
             [
-                torch.Tensor(dec_input_tokens, dtype = torch.int64), 
+                torch.tensor(dec_input_tokens, dtype=torch.int64),
                 self.eos_token, # add [EOS] token at the end of the output, because during training, we will use teacher forcing, which means we will feed the target sentence as input to the decoder, so we need to add [EOS] token at the end of the output, because the model will learn to predict it at the end of the output
-                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype = torch.int64) 
+                torch.tensor([self.pad_token.item()] * dec_num_padding_tokens, dtype=torch.int64) 
             ]
         )
 
