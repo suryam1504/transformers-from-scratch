@@ -43,7 +43,7 @@ def get_or_build_tokenizer(config, ds, lang):
 
 # load datsset
 def get_ds(config):
-    ds_raw = load_dataset('opus_books', f'{config["lang_src"]}-{config["lang_tgt"]}', split='train') # this train split is a feature available in original dataset and kinda is the only split available, so we need to write this to download the "full" dataset, and later we split it ourselves into train and val
+    ds_raw = load_dataset('Helsinki-NLP/opus_books', f'{config["lang_src"]}-{config["lang_tgt"]}', split='train') # this train split is a feature available in original dataset and kinda is the only split available, so we need to write this to download the "full" dataset, and later we split it ourselves into train and val
 
     # build tokenizers
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
